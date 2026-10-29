@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>OedoCalc Geoteknik</title>
+    <script type="module" crossorigin src="https://cdn.jsdelivr.net/npm/@gradio/lite/dist/lite.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@gradio/lite/dist/lite.css" />
+    <style>
+      body { margin: 0; padding: 0; background-color: #0f172a; }
+    </style>
+  </head>
+  <body>
+    <!-- Menentukan pustaka Python murni tanpa dependensi huggingface-hub -->
+    <gradio-lite requirements="pandas, matplotlib, numpy">
+import gradio as gr
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+import tempfile
+import math
+
+def olah_data_dan_export(file_data, D_sample, H0, e0, beban_kg_str, penurunan_str, tebal_lempung, cv, drainase, luas_bangunan):
+    try:
+        # 1. BACA DATA BEBAN & PENURUNAN
+        if file_data is not None:
+            if file_data.name.endswith('.csv'):
+                df = pd.read_csv(file_data.name)
+            else:
+                df = pd.read_excel(file_data.name)
+            beban_kg = df.iloc[:, 0].dropna().astype(float).tolist()
+            dH = df.iloc[:, 1].dropna().astype(float).tolist()
+        else:
+            beban_kg = [float(x.strip()) for x in beban_kg_str.split(',')]
+            dH = [float(x.strip()) for x in penurunan_str.split(',')]
+        
+        if len(beban_kg) != len(dH):
+            return "Error: Jumlah data beban (kg) dan penurunan (mm) tidak sama.", "", None, None
+
+        # 2. KONVERSI BEBAN (kg -> kPa)
+        D_m = D_sample / 1000.0
+        A_m2 = (math.pi / 4.0) * (D_m ** 2)
+        p = [(kg * 9.81 / A_m2) / 1000.0 for kg in beban_kg]
+
+        # 3. PERHITUNGAN KONSOLIDASI
+        e_list = [(e0 - ((delta_h / H0) * (1 + e0))) for delta_h in dH]
+        Cc = (e_list[-2] - e_list[-1]) / np.log10(p[-1] / p[-2])
+        
+        Tv = 0.848
+        H_dr = tebal_lempung / 2.0 if "2 Arah" in drainase else tebal_lempung
+        t90_tahun = (Tv * (H_dr ** 2)) / cv if cv > 0 else 0
+        t90_bulan = t90_tahun * 12.0
+        
+        # 4. KLASIFIKASI & RAB
+        if Cc < 0.2:
+            kemampatan = "RENDAH (Low Compressibility) - Tanah Padat"
+            rekomendasi = "Pondasi Dangkal (Footplat / Batu Kali)."
+            pekerjaan = "- Penggalian tanah\n- Urugan pasir & lantai kerja\n- Pembesian & bekisting\n- Pengecoran beton"
+            total_bawah = luas_bangunan * 500000
+            total_atas = luas_bangunan * 600000
+            rab_text = f"1. Pekerjaan Tanah : Rp {luas_bangunan * 100000:,.0f}\n2. Lantai Kerja : Rp {luas_bangunan * 50000:,.0f}\n3. Pembesian : Rp {luas_bangunan * 150000:,.0f}\n4. Pengecoran : Rp {luas_bangunan * 200000:,.0f}\n------------------------\nJUMLAH ESTIMASI : Rp {total_bawah:,.0f} s/d Rp {total_atas:,.0f}"
+        elif 0.2 <= Cc <= 0.4:
+            kemampatan = "SEDANG (Medium Compressibility) - Lempung Sedang"
+            rekomendasi = "Pondasi Minipile (Tiang Pancang Skala Kecil)."
+            pekerjaan = "- Mobilisasi alat\n- Pengadaan tiang\n- Pemancangan\n- Pengecoran pile cap"
+            total_bawah = (luas_bangunan * 1150000) + 25000000
+            total_atas = (luas_bangunan * 1350000) + 25000000
+            rab_text = f"1. Mobilisasi Alat : Rp 25,000,000\n2. Tiang Pancang : Rp {luas_bangunan * 550000:,.0f}\n3. Jasa Pancang : Rp {luas_bangunan * 350000:,.0f}\n4. Pile Cap : Rp {luas_bangunan * 250000:,.0f}\n------------------------\nJUMLAH ESTIMASI : Rp {total_bawah:,.0f} s/d Rp {total_atas:,.0f}"
+        else:
+            kemampatan = "TINGGI (High Compressibility) - Tanah Sangat Lunak"
+            rekomendasi = "Perbaikan Tanah Masif (PVD + Preloading)."
+            pekerjaan = "- Penghamparan Geotextile\n- Penetrasi PVD\n- Penimbunan beban\n- Pemantauan"
+            total_bawah = (luas_bangunan * 2600000) + 45000000
+            total_atas = (luas_bangunan * 2900000) + 45000000
+            rab_text = f"1. Mobilisasi Rig PVD : Rp 45,000,000\n2. Geotextile : Rp {luas_bangunan * 350000:,.0f}\n3. Material PVD : Rp {luas_bangunan * 850000:,.0f}\n4. Tanah Timbun : Rp {luas_bangunan * 1250000:,.0f}\n5. Instrumen : Rp {luas_bangunan * 150000:,.0f}\n------------------------\nJUMLAH ESTIMASI : Rp {total_bawah:,.0f} s/d Rp {total_atas:,.0f}"
+
+        laporan_teknis = f"--- KONVERSI BEBAN LAB ---\nDiameter Cincin: {D_sample} mm (Luas = {A_m2*10000:.2f} cm²)\nTegangan (kPa): {[round(x, 2) for x in p]}\n\n--- DIAGNOSA LAB ---\nCc: {Cc:.4f}\nKlasifikasi: {kemampatan}\n\n--- ESTIMASI PENURUNAN ---\nTebal Lempung: {tebal_lempung} m\nWaktu t90: {t90_tahun:.2f} Tahun ({t90_bulan:.0f} Bulan)\n\n--- REKOMENDASI TEKNIS ---\nSolusi: {rekomendasi}\nTahapan:\n{pekerjaan}"
+        
+        # 5. EKSPOR DATA KE FORMAT CSV (NATIVE)
+        df_hasil = pd.DataFrame({'Beban (kg)': beban_kg, 'Tegangan (kPa)': p, 'Penurunan (mm)': dH, 'Angka Pori (e)': e_list})
+        temp_csv = tempfile.NamedTemporaryFile(delete=False, suffix=".csv")
+        df_hasil.to_csv(temp_csv.name, index=False)
+
+        # 6. GRAFIK e - log p
+        fig, ax = plt.subplots(figsize=(7, 5))
+        ax.plot(p, e_list, marker='o', linestyle='-', color='teal', linewidth=2)
+        ax.set_xscale('log')
+        ax.set_xlabel('Tegangan Efektif, p (kPa)')
+        ax.set_ylabel('Angka Pori, e')
+        ax.set_title('Kurva Konsolidasi (e - log p)')
+        ax.grid(True, which="both", ls="--", linewidth=0.5)
+        ax.invert_yaxis() 
+        plt.tight_layout()
+        
+        return laporan_teknis, rab_text, fig, temp_csv.name
+    except Exception as e:
+        return f"Terjadi kesalahan: {str(e)}", "", None, None
+
+# TAMPILAN ANTARMUKA GRADIO
+kustom_css = """
+.gradio-container { background-image: url('https://images.unsplash.com/photo-1541888088320-bf1bce62d494?q=80&w=1920&auto=format&fit=crop') !important; background-size: cover !important; background-position: center !important; background-attachment: fixed !important; }
+#papan-utama { background-color: rgba(255, 255, 255, 0.9) !important; padding: 25px !important; border-radius: 15px !important; box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3) !important; margin: 20px !important; }
+"""
+
+with gr.Blocks(theme=gr.themes.Soft(), css=kustom_css) as aplikasi:
+    with gr.Column(elem_id="papan-utama"):
+        gr.Markdown("# 🏗️ OedoCalc: Kalkulator Geoteknik Konsolidasi")
+        with gr.Row():
+            with gr.Column(scale=1):
+                D_input = gr.Number(label="Diameter Cincin (mm)", value=63.5)
+                H0_input = gr.Number(label="Tinggi Sampel H0 (mm)", value=20.0)
+                e0_input = gr.Number(label="Angka Pori Awal (e0)", value=1.15)
+                with gr.Tabs():
+                    with gr.TabItem("⌨️ Input Manual"):
+                        beban_input = gr.Textbox(label="Beban (kg)", value="0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0")
+                        penurunan_input = gr.Textbox(label="Penurunan (mm)", value="0.15, 0.35, 0.75, 1.40, 2.50, 4.10, 5.90, 7.80")
+                    with gr.TabItem("📁 Upload File"):
+                        file_input = gr.File(label="Upload File Data (.csv/.xlsx)")
+                tebal_input = gr.Number(label="Tebal Lempung (m)", value=10.0)
+                cv_input = gr.Number(label="Cv (m²/thn)", value=1.5)
+                drainase_input = gr.Radio(choices=["1 Arah", "2 Arah (Atas & Bawah)"], value="2 Arah (Atas & Bawah)", label="Drainase")
+                luas_input = gr.Number(label="Luas Proyek (m²)", value=500.0)
+                tombol_analisis = gr.Button("🚀 Proses & Hitung Data", variant="primary")
+            with gr.Column(scale=1):
+                with gr.Tabs():
+                    with gr.TabItem("📄 Laporan Teknis"):
+                        laporan_out = gr.Textbox(label="Hasil Diagnosa", lines=10)
+                    with gr.TabItem("💰 Rincian RAB"):
+                        rab_out = gr.Textbox(label="Estimasi Biaya", lines=10)
+                    with gr.TabItem("📈 Kurva e-log p"):
+                        grafik_out = gr.Plot(label="Kurva Konsolidasi")
+                file_csv_out = gr.File(label="📊 Unduh Tabel Hasil (.csv)")
+
+        tombol_analisis.click(
+            fn=olah_data_dan_export, 
+            inputs=[file_input, D_input, H0_input, e0_input, beban_input, penurunan_input, tebal_input, cv_input, drainase_input, luas_input], 
+            outputs=[laporan_out, rab_out, grafik_out, file_csv_out]
+        )
+
+aplikasi.launch()
+    </gradio-lite>
+  </body>
+</html>
